@@ -1,0 +1,7 @@
+{
+  "name": "sync-engine",
+  "version": "0.1.0",
+  "description": "Real-time collaborative sync engine built on a from-scratch CRDT",
+  "type": "module",
+  "scripts": { "test": "node --test test/*.test.js" }
+}
