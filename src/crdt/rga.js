@@ -78,6 +78,10 @@ export class RGA{
     }
 
     // ---------- reading ----------
+    has(id) {
+        return this.#index.has(idToString(id));
+    }
+    
     toString(){
         let out = '';
         for(let n = this.#head.next; n; n = n.next){
