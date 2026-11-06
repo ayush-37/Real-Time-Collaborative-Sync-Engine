@@ -4,6 +4,10 @@
   "description": "Real-time collaborative sync engine built on a from-scratch CRDT",
   "type": "module",
   "scripts": {
-  "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "start": "node src/server/index.js"
+  },
+  "dependencies": {
+    "ws": "^8.22.1"
   }
 }

@@ -5,6 +5,7 @@
 // so every character in the document has a globally unique ID.
 
 export const ROOT_ID = Object.freeze({clock: 0, site: 'ROOT'});
+
 export function makeId(clock, site){
     return Object.freeze({clock, site});
 }
