@@ -11,19 +11,22 @@ import http from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { Document } from '../doc/document.js';
 import { parseMessage, encode, ProtocolError } from '../net/protocol.js';
+import { serveStatic } from './static.js';
 
-export async function startSyncServer({ port = 3000, heartbeatMs = 30_000 } = {}) {
+export async function startSyncServer({ port = 3000, heartbeatMs = 30_000 } = {} /*Without = {}, calling it without arguments would cause an error because JavaScript cannot destructure undefined.*/ ) {
   const rooms = new Map(); // docId -> { doc: Document, clients: Set<WebSocket> }
 
   // plain HTTP server underneath: gives us /health now and static files for the browser on Day 7
   const httpServer = http.createServer((req, res) => {
     if (req.url === '/health') {
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.writeHead(200/*the request succeeded*/, { 'Content-Type': 'text/plain' });
       res.end('ok');
       return;
     }
-    res.writeHead(404);
-    res.end();
+    serveStatic(req,res).catch(() =>{
+      res.writeHead(404); /*the requested route was not found.*/
+      res.end();
+    });
   });
   const wss = new WebSocketServer({ server: httpServer, maxPayload: 1024 * 1024 });
 

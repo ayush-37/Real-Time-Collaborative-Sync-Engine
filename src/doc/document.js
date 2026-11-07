@@ -45,6 +45,11 @@ export class Document{
     get tombstoneCount(){return this.#rga.tombstoneCount;}
     get pendingCount() { return this.#bufferedKeys.size; }
 
+    // cursor helpers (see RGA): a cursor = id of the char before it
+    anchorAt(index) {return this.#rga.anchorAt(index);}
+    indexOfAnchor(anchor) {
+        return this.#rga.indexOfAnchor(anchor);
+    }
     //  return a copy of the log, so callers cannot mutate our history
     get log(){return [...this.#log];}
 

@@ -78,7 +78,31 @@ export class RGA{
     }
 
     // ---------- reading ----------
-    has(id) {
+        // ---------- cursors ----------
+        // A cursor is stored as the id of the character just BEFORE it (ROOT_ID = start of text).
+        // Ids never change, so the cursor survives remote edits; indexes do not.
+
+    anchorAt(index){
+        if(index <= 0) return ROOT_ID;
+        const node = this.#visibleNode(index - 1);
+        if(!node) throw new RangeError(`anchorAt: index (${index}) out of range`);
+        return node.id;
+    }
+    // visible index of a cursor that sits right after `anchor`.
+    // If the anchor char was deleted (tombstone) the cursor stays at that spot.
+    indexOfAnchor(anchor){
+        const target = this.#index.get(idToString(anchor));
+        if(!target) throw new Error(`indexOfAnchor: unknown anchor ${idToString(anchor)}`);
+        if(target === this.#head) return 0;
+        let count = 0;
+        for(let n = this.#head.next; n ; n = n.next){
+            if(!n.deleted)count++;
+            if(n === target) return count;
+        }
+        throw new Error(`indexOfAnchor: anchor not reachable`);
+    }
+
+     has(id) {
         return this.#index.has(idToString(id));
     }
     
