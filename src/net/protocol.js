@@ -24,6 +24,7 @@ export class ProtocolError extends Error {
     this.fatal = fatal;
   }
 }
+// Custom error classes allow us to implement different error-handling policies based on the error type.
 
 const fail = (msg) => { throw new ProtocolError(msg); };
 const isInt = (n) => Number.isSafeInteger(n);

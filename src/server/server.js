@@ -13,7 +13,7 @@ import { Document } from '../doc/document.js';
 import { parseMessage, encode, ProtocolError } from '../net/protocol.js';
 import { serveStatic } from './static.js';
 
-export async function startSyncServer({ port = 3000, heartbeatMs = 30_000 } = {} /*Without = {}, calling it without arguments would cause an error because JavaScript cannot destructure undefined.*/ ) {
+export async function startSyncServer({ port = 3000, heartbeatMs = 30_000 ,host = '172.20.66.128' } = {} /*Without = {}, calling it without arguments would cause an error because JavaScript cannot destructure undefined.*/ ) {
   const rooms = new Map(); // docId -> { doc: Document, clients: Set<WebSocket> }
 
   // plain HTTP server underneath: gives us /health now and static files for the browser on Day 7
@@ -110,7 +110,7 @@ export async function startSyncServer({ port = 3000, heartbeatMs = 30_000 } = {}
     }
   }, heartbeatMs);
 
-  await new Promise((resolve) => httpServer.listen(port, resolve));
+  await new Promise((resolve) => httpServer.listen(port, '0.0.0.0', resolve));
 
   return {
     port: httpServer.address().port,

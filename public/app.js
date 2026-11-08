@@ -10,7 +10,8 @@ const docId = /^[A-Za-z0-9_-]{1,64}$/.test(wanted) ? wanted : 'demo';
 
 // A NEW site id on every page load. Never reuse a site id with a reset counter:
 // a reloaded tab would start again at seq 1 and the server would drop those ops as duplicates.
-const site = `u-${crypto.randomUUID().slice(0, 8)}`;
+const site = `u-${crypto.getRandomValues(new Uint32Array(2))
+  .join('-')}`;
 
 const editor = document.querySelector('#editor');
 const statusEl = document.querySelector('#status');
@@ -60,8 +61,7 @@ function render() {
     const end = doc.indexOfAnchor(cursor.end);
     const scroll = editor.scrollTop;
     editor.value = text;
-    // if (document.activeElement === editor) editor.setSelectionRange(start, end);
-    editor.setSelectionRange(start, end);
+    if (document.activeElement === editor) editor.setSelectionRange(start, end);
     editor.scrollTop = scroll;
   }
   statsEl.textContent =
