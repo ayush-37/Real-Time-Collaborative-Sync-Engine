@@ -3,20 +3,31 @@
 //
 // The server is just another replica (a peer), NOT a transformer or a referee:
 //   - it applies every op to its own Document (dedup + causal buffering come for free)
-//   - it broadcasts each op exactly once, at the moment it is APPLIED (not merely received),
-//     to every client except the op's author. An op parked in the causal buffer is broadcast
-//     later, when the missing parent arrives and releases it.
+//   - it broadcasts each op exactly once, at the moment it is APPLIED, to every client except the author
 //   - a client that joins later is caught up with opsSince(its version vector)
 //
-// State lives in memory only: restarting the server loses documents (persistence = later).
+// Day 9: with `dataDir` set, every applied op is also appended to a write-ahead log on disk, and a
+// room is rebuilt from snapshot + WAL the first time someone asks for it. Without `dataDir` the
+// server is memory-only like before.
 import http from 'node:http';
+import fs from 'node:fs/promises';
 import { WebSocketServer, WebSocket } from 'ws';
 import { Document } from '../doc/document.js';
 import { parseMessage, encode, ProtocolError, MAX_OPS_PER_MESSAGE } from '../net/protocol.js';
 import { serveStatic } from './static.js';
+import { DocStorage } from './storage.js';
 
-export async function startSyncServer({ port = 3000, heartbeatMs = 30_000 } = {}) {
-  const rooms = new Map(); // docId -> { doc: Document, clients: Set<WebSocket> }
+export async function startSyncServer({
+  port = 3000,
+  heartbeatMs = 30_000,
+  dataDir = null,         // folder for the logs; null = memory only
+  snapshotEvery = 1000,   // compact when the WAL holds this many ops
+  fsync = true,           // true = survive power loss; false = faster (tests)
+} = {}) {
+  if (dataDir) await fs.mkdir(dataDir, { recursive: true });
+
+  const rooms = new Map();   // docId -> { doc, clients, outbox, storage }
+  const loading = new Map(); // docId -> Promise<room>, so two joins never load the same doc twice
 
   // plain HTTP server underneath: /health plus the static files for the browser client
   const httpServer = http.createServer((req, res) => {
@@ -32,18 +43,49 @@ export async function startSyncServer({ port = 3000, heartbeatMs = 30_000 } = {}
   });
   const wss = new WebSocketServer({ server: httpServer, maxPayload: 1024 * 1024 });
 
-  const getRoom = (docId) => {
-    if (!rooms.has(docId)) {
-      const room = { doc: new Document('server'), clients: new Set(), outbox: [] };
-      // every op that ENTERS the server's log (directly, or released from the buffer) is queued here
-      room.doc.onChange(({ op }) => room.outbox.push(op));
-      rooms.set(docId, room);
+  async function createRoom(docId) {
+    const doc = new Document('server');
+    const room = { doc, clients: new Set(), outbox: [], storage: null };
+    if (dataDir) {
+      room.storage = new DocStorage(dataDir, docId, { fsync });
+      const { ops, repaired } = await room.storage.load();
+      for (const op of ops) doc.applyRemote(op); // replay BEFORE listening, so loaded ops are not re-appended
+      if (repaired) console.warn(`[storage] ${docId}: dropped a torn record at the end of the WAL`);
     }
-    return rooms.get(docId);
+    // every op that ENTERS the server's log (directly, or released from the buffer) is queued here
+    doc.onChange(({ op }) => room.outbox.push(op));
+    return room;
+  }
+
+  const getRoom = async (docId) => {
+    const existing = rooms.get(docId);
+    if (existing) return existing;
+    if (!loading.has(docId)) {
+      loading.set(
+        docId,
+        createRoom(docId)
+          .then((room) => {
+            rooms.set(docId, room);
+            return room;
+          })
+          .finally(() => loading.delete(docId)),
+      );
+    }
+    return loading.get(docId);
   };
 
   const send = (ws, msg) => {
     if (ws.readyState === WebSocket.OPEN) ws.send(encode(msg));
+  };
+
+  // fire-and-forget persistence: broadcasting does not wait for the disk (write-behind).
+  // Authors still hold their own ops, so a crash in this window is repaired by Day 8's resend.
+  const persist = (room, ops) => {
+    if (!room.storage) return;
+    room.storage.append(ops).catch((err) => console.error('[storage] append failed:', err.message));
+    room.storage
+      .maybeCompact(() => room.doc.log, snapshotEvery)
+      ?.catch((err) => console.error('[storage] compaction failed:', err.message));
   };
 
   // Send everything applied since the last flush: one batched message per client,
@@ -51,6 +93,7 @@ export async function startSyncServer({ port = 3000, heartbeatMs = 30_000 } = {}
   const flushOutbox = (room) => {
     const applied = room.outbox.splice(0);
     if (applied.length === 0) return;
+    persist(room, applied);
     for (const client of room.clients) {
       const theirs = applied.filter((op) => op.site !== client.site);
       for (let i = 0; i < theirs.length; i += MAX_OPS_PER_MESSAGE) {
@@ -59,9 +102,16 @@ export async function startSyncServer({ port = 3000, heartbeatMs = 30_000 } = {}
     }
   };
 
-  function handleJoin(ws, msg) {
+  async function handleJoin(ws, msg) {
     if (ws.room) throw new ProtocolError('already joined');
-    const room = getRoom(msg.docId);
+    let room;
+    try {
+      room = await getRoom(msg.docId);
+    } catch (err) {
+      console.error(`[storage] cannot load ${msg.docId}:`, err.message);
+      throw new ProtocolError('document unavailable', { fatal: true });
+    }
+    if (ws.readyState !== WebSocket.OPEN) return; // the client left while the room was loading
     ws.room = room;
     ws.site = msg.site;
     room.clients.add(ws);
@@ -84,26 +134,33 @@ export async function startSyncServer({ port = 3000, heartbeatMs = 30_000 } = {}
     flushOutbox(ws.room);
   }
 
+  async function handleMessage(ws, data, isBinary) {
+    try {
+      if (isBinary) throw new ProtocolError('binary frames are not supported');
+      const msg = parseMessage(data.toString());
+      if (msg.type === 'join') await handleJoin(ws, msg);
+      else if (msg.type === 'ops') handleOps(ws, msg);
+      else throw new ProtocolError(`clients may not send "${msg.type}"`);
+    } catch (err) {
+      if (err instanceof ProtocolError) {
+        send(ws, { type: 'error', message: err.message });
+        if (err.fatal) ws.close(1008, 'policy violation');
+      } else {
+        console.error('unexpected server error:', err); // a bug on OUR side: never crash the server
+        send(ws, { type: 'error', message: 'internal error' });
+      }
+    }
+  }
+
   wss.on('connection', (ws) => {
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
 
+    // join is async now (it may read the disk), so messages of ONE socket are processed strictly
+    // one after another. Otherwise an 'ops' message sent right behind 'join' would overtake it.
+    ws.queue = Promise.resolve();
     ws.on('message', (data, isBinary) => {
-      try {
-        if (isBinary) throw new ProtocolError('binary frames are not supported');
-        const msg = parseMessage(data.toString());
-        if (msg.type === 'join') handleJoin(ws, msg);
-        else if (msg.type === 'ops') handleOps(ws, msg);
-        else throw new ProtocolError(`clients may not send "${msg.type}"`);
-      } catch (err) {
-        if (err instanceof ProtocolError) {
-          send(ws, { type: 'error', message: err.message });
-          if (err.fatal) ws.close(1008, 'policy violation');
-        } else {
-          console.error('unexpected server error:', err); // a bug on OUR side: never crash the server
-          send(ws, { type: 'error', message: 'internal error' });
-        }
-      }
+      ws.queue = ws.queue.then(() => handleMessage(ws, data, isBinary)); // handleMessage never rejects
     });
 
     ws.on('close', () => { ws.room?.clients.delete(ws); });
@@ -130,6 +187,8 @@ export async function startSyncServer({ port = 3000, heartbeatMs = 30_000 } = {}
       for (const ws of wss.clients) ws.terminate();
       await new Promise((resolve) => wss.close(resolve));
       await new Promise((resolve) => httpServer.close(resolve));
+      // graceful shutdown: let every queued disk write finish
+      await Promise.all([...rooms.values()].map((room) => room.storage?.flush()));
     },
   };
 }
