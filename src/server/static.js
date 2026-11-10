@@ -3,6 +3,7 @@
 //   /            -> public/index.html
 //   /app.js ...  -> public/*
 //   /src/{crdt,doc,net,client}/*.js -> shared modules (never /src/server)
+// This file decides which files the browser is allowed to access.
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

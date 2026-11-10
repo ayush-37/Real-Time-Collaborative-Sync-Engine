@@ -3,35 +3,42 @@
 //
 // The server is just another replica (a peer), NOT a transformer or a referee:
 //   - it applies every op to its own Document (dedup + causal buffering come for free)
-//   - it broadcasts each op exactly once (when it is first seen) to every OTHER client
+//   - it broadcasts each op exactly once, at the moment it is APPLIED (not merely received),
+//     to every client except the op's author. An op parked in the causal buffer is broadcast
+//     later, when the missing parent arrives and releases it.
 //   - a client that joins later is caught up with opsSince(its version vector)
 //
 // State lives in memory only: restarting the server loses documents (persistence = later).
 import http from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { Document } from '../doc/document.js';
-import { parseMessage, encode, ProtocolError } from '../net/protocol.js';
+import { parseMessage, encode, ProtocolError, MAX_OPS_PER_MESSAGE } from '../net/protocol.js';
 import { serveStatic } from './static.js';
 
-export async function startSyncServer({ port = 3000, heartbeatMs = 30_000 ,host = '172.20.66.128' } = {} /*Without = {}, calling it without arguments would cause an error because JavaScript cannot destructure undefined.*/ ) {
+export async function startSyncServer({ port = 3000, heartbeatMs = 30_000 } = {}) {
   const rooms = new Map(); // docId -> { doc: Document, clients: Set<WebSocket> }
 
-  // plain HTTP server underneath: gives us /health now and static files for the browser on Day 7
+  // plain HTTP server underneath: /health plus the static files for the browser client
   const httpServer = http.createServer((req, res) => {
     if (req.url === '/health') {
-      res.writeHead(200/*the request succeeded*/, { 'Content-Type': 'text/plain' });
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end('ok');
       return;
     }
-    serveStatic(req,res).catch(() =>{
-      res.writeHead(404); /*the requested route was not found.*/
+    serveStatic(req, res).catch(() => {
+      res.writeHead(500);
       res.end();
     });
   });
   const wss = new WebSocketServer({ server: httpServer, maxPayload: 1024 * 1024 });
 
   const getRoom = (docId) => {
-    if (!rooms.has(docId)) rooms.set(docId, { doc: new Document('server'), clients: new Set() });
+    if (!rooms.has(docId)) {
+      const room = { doc: new Document('server'), clients: new Set(), outbox: [] };
+      // every op that ENTERS the server's log (directly, or released from the buffer) is queued here
+      room.doc.onChange(({ op }) => room.outbox.push(op));
+      rooms.set(docId, room);
+    }
     return rooms.get(docId);
   };
 
@@ -39,10 +46,16 @@ export async function startSyncServer({ port = 3000, heartbeatMs = 30_000 ,host 
     if (ws.readyState === WebSocket.OPEN) ws.send(encode(msg));
   };
 
-  const broadcast = (room, sender, msg) => {
-    const frame = encode(msg); // serialise once, send to everyone
+  // Send everything applied since the last flush: one batched message per client,
+  // never containing a client's own ops (it already has them).
+  const flushOutbox = (room) => {
+    const applied = room.outbox.splice(0);
+    if (applied.length === 0) return;
     for (const client of room.clients) {
-      if (client !== sender && client.readyState === WebSocket.OPEN) client.send(frame);
+      const theirs = applied.filter((op) => op.site !== client.site);
+      for (let i = 0; i < theirs.length; i += MAX_OPS_PER_MESSAGE) {
+        send(client, { type: 'ops', ops: theirs.slice(i, i + MAX_OPS_PER_MESSAGE) });
+      }
     }
   };
 
@@ -66,12 +79,9 @@ export async function startSyncServer({ port = 3000, heartbeatMs = 30_000 ,host 
       }
     }
 
-    const fresh = [];
-    for (const op of msg.ops) {
-      const status = ws.room.doc.applyRemote(op); // 'applied' | 'buffered' | 'duplicate'
-      if (status !== 'duplicate') fresh.push(op);  // duplicates were already broadcast once
-    }
-    if (fresh.length > 0) broadcast(ws.room, ws, { type: 'ops', ops: fresh });
+    // duplicates produce no event (already in the log); buffered ops produce one later
+    for (const op of msg.ops) ws.room.doc.applyRemote(op);
+    flushOutbox(ws.room);
   }
 
   wss.on('connection', (ws) => {
@@ -110,7 +120,7 @@ export async function startSyncServer({ port = 3000, heartbeatMs = 30_000 ,host 
     }
   }, heartbeatMs);
 
-  await new Promise((resolve) => httpServer.listen(port, '0.0.0.0', resolve));
+  await new Promise((resolve) => httpServer.listen(port, resolve));
 
   return {
     port: httpServer.address().port,

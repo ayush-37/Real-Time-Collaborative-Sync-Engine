@@ -34,6 +34,13 @@ function parseName(value, label) {
   return value;
 }
 
+// a site (replica) name: valid format and not one of the reserved names
+export function parseSite(value) {
+  const site = parseName(value, 'site');
+  if (RESERVED_SITES.has(site)) fail('reserved site name');
+  return site;
+}
+
 function parseCharId(raw, label, { minClock }) {
   if (!raw || typeof raw !== 'object') fail(`invalid ${label}`);
   if (!isInt(raw.clock) || raw.clock < minClock) fail(`invalid ${label}.clock`);

@@ -158,6 +158,16 @@ export class Document{
         return doc;
     }
 
+    // Rebuild a replica that CONTINUES as `site` from a saved log (e.g. after a page reload).
+    // Unlike replay() it also restores the local seq counter, so new ops never reuse an old seq.
+    // (The Lamport clock is restored automatically: replaying our own inserts advances it.)
+    static restore(site, ops) {
+        const doc = new Document(site);
+        for (const op of ops) doc.applyRemote(op);
+        doc.#seq = ops.reduce((max, op) => (op.site === site ? Math.max(max, op.seq) : max), 0);
+        return doc;
+    }
+
     // ---------- internals ----------
     #commitLocal(rgaOp){
         const op = Object.freeze({ ...rgaOp, site: this.#site, seq: ++this.#seq});

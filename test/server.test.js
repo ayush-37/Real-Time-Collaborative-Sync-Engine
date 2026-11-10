@@ -224,6 +224,33 @@ test('a client that never answers pings is terminated by the heartbeat', async (
   }, { heartbeatMs: 60 });
 });
 
+test('REGRESSION: an op parked in the server buffer is still delivered to a client that joined meanwhile', async () => {
+  await withServer(async ({ open }) => {
+    // alice's two chars, and bob's op that DEPENDS on alice's second char
+    const alice = new Document('alice');
+    const aOps = alice.insertText(0, 'ab');
+    const bobDoc = new Document('bob');
+    aOps.forEach((op) => bobDoc.applyRemote(op));
+    const [bOp] = bobDoc.insertText(2, 'c');           // its parent is alice's 'b'
+
+    const bob = await open();
+    join(bob, 'doc1', 'bob');
+    await until(() => bob.ofType('sync').length === 1);
+    bob.send({ type: 'ops', ops: [bOp] });             // the server lacks alice's chars -> parks it
+    await sleep(50);
+
+    const a = await open();
+    join(a, 'doc1', 'alice');                          // alice joins while bob's op is parked
+    await until(() => a.ofType('sync').length === 1);
+    assert.equal(a.ofType('sync')[0].ops.length, 0);   // parked ops are not in the log, so not in the catch-up
+
+    a.send({ type: 'ops', ops: aOps });                // alice's ops arrive -> the server releases bob's op
+    await until(() => a.ofType('ops').length >= 1);
+    assert.deepEqual(a.ofType('ops').flatMap((m) => m.ops).map((o) => `${o.site}:${o.seq}`), ['bob:1']);
+    await until(() => bob.ofType('ops').flatMap((m) => m.ops).length === 2);   // bob gets alice's 2 ops
+  });
+});
+
 test('END TO END: two Documents wired through the server converge, including concurrent edits', async () => {
   await withServer(async ({ open }) => {
     const alice = new Document('alice');
