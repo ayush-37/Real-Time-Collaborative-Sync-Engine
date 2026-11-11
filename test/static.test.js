@@ -92,7 +92,8 @@ test('every import in the browser code resolves (no broken or Node-only imports)
     }
         for (const required of ['/app.js', '/src/doc/document.js', '/src/crdt/rga.js', '/src/crdt/lamport.js',
                             '/src/crdt/charId.js', '/src/net/protocol.js', '/src/client/sync-client.js',
-                            '/src/client/persistence.js']) {
+                            '/src/client/persistence.js','/src/doc/history.js',
+  '/src/client/history-view.js']) {
       assert.ok(seen.has(required), `module graph is missing ${required}`);
     }
   });

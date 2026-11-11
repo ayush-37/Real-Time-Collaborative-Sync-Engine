@@ -4,6 +4,7 @@ import { Document } from '/src/doc/document.js';
 import { SyncClient } from '/src/client/sync-client.js';
 import { LocalStore, autosave, memoryStorage } from '/src/client/persistence.js';
 import { ROOT_ID } from '/src/crdt/charId.js';
+import { mountHistory } from '/src/client/history-view.js';
 
 const params = new URLSearchParams(location.search);
 const wanted = params.get('doc') ?? '';
@@ -85,6 +86,7 @@ function render() {
     `${doc.length} chars · ${doc.log.length} ops · ${doc.tombstoneCount} tombstones · ${doc.pendingCount} pending`;
 }
 doc.onChange(scheduleRender);
+mountHistory({ doc });
 
 // ----- connection status (typing keeps working offline) -----
 client.onStatus((state) => {
