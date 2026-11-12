@@ -13,8 +13,9 @@
 // is re-sent by the 'sync' handshake of the next connection.
 import { parseMessage, encode, MAX_OPS_PER_MESSAGE } from '../net/protocol.js';
 
-// "Full jitter": wait a RANDOM time between 0 and min(maxMs, baseMs * 2^attempt).
-// attempt 0 -> up to base, attempt 1 -> up to 2*base, attempt 2 -> up to 4*base ... capped at maxMs.
+// backoffDelay() calculates how long a client should wait before attempting to reconnect to the server.
+// It uses exponential backoff with full jitter.
+// The purpose is to prevent many disconnected clients from reconnecting simultaneously and overwhelming the server.
 export function backoffDelay(attempt, { baseMs = 500, maxMs = 15_000, random = Math.random } = {}) {
   const cap = Math.min(maxMs, baseMs * 2 ** attempt);
   return Math.floor(random() * cap);
@@ -38,12 +39,15 @@ export class SyncClient {
   #wantOpen = false;   // true between connect() and close()
   #attempt = 0;        // consecutive failed attempts; reset only after a successful sync
   #retryTimer = null;
+  // --- Day 12 ---
+  #beforeSend;
 
-  constructor({ url, docId, document, WebSocketImpl = globalThis.WebSocket, reconnect = {} }) {
+  constructor({ url, docId, document, WebSocketImpl = globalThis.WebSocket, reconnect = {}, beforeSend = null}) {
     this.#url = url;
     this.#docId = docId;
     this.#doc = document;
     this.#WS = WebSocketImpl;
+    this.#beforeSend = beforeSend;    // Day 12: runs BEFORE ops leave, so they are saved locally first
     this.#reconnect = { enabled: true, baseMs: 500, maxMs: 15_000, random: Math.random, ...reconnect };
 
     // every LOCAL op goes to the server; remote ops are ignored here (no echo loops)
@@ -67,8 +71,12 @@ export class SyncClient {
   }
 
   // Skip the backoff wait right now (e.g. the browser fired its 'online' event).
+  // Normally, when the WebSocket connection fails, the client waits for the scheduled backoff delay before trying again.
+  // But sometimes we receive an online event from the browser, indicating that network connectivity may have returned.
   retryNow() {
     if (!this.#wantOpen || this.#ws) return;
+    // !this.#wantOpen: the client was intentionally closed, so it must not reconnect.
+    // this.#ws: a WebSocket already exists, so another connection should not be created.
     this.#clearRetryTimer();
     this.#open();
   }
@@ -176,7 +184,13 @@ export class SyncClient {
   }
 
   #send(msg) {
-    if (this.#ws && this.#ws.readyState === 1) this.#ws.send(encode(msg)); // 1 = OPEN
+    if (!this.#ws || this.#ws.readyState !== 1) return; // 1 = OPEN
+    if (msg.type === 'ops') {
+      // write-ahead: once the server has an op it must already be on disk locally, or a crash
+      // between "sent" and "saved" lets a reload re-use a (site, seq) the server already knows
+      try { this.#beforeSend?.(); } catch (err) { this.#emitError(err); }
+    }
+    this.#ws.send(encode(msg));
   }
 
   #setStatus(status) {

@@ -117,6 +117,9 @@ export class Document{
         }
 
         this.#integrateRemote(op);
+        if (op.site === this.#site) {
+            this.#seq = Math.max(this.#seq, op.seq);
+        }
         this.#drainPending(op);
         return 'applied';
     }
@@ -152,9 +155,16 @@ export class Document{
 
     // ---------- replay ----------
     // Rebuild a document purely from a log (or a prefix of one).
-    static replay(site, ops){
+    static replay(site, ops) {
         const doc = new Document(site);
-        for(const op of ops)doc.applyRemote(op);
+
+        for (const op of ops) {
+            doc.applyRemote(op);
+        }
+
+        // Replay reconstructs history but does not continue the local sequence.
+        doc.#seq = 0;
+
         return doc;
     }
 
@@ -177,11 +187,16 @@ export class Document{
         return op;
     }
 
-    #integrateRemote(op){
-        this.#rga.applyRemote(op);      // its boolean is NOT our duplicate test: identity is (site, seq)
+    #integrateRemote(op) {
+        this.#rga.applyRemote(op);
+
+        if (op.site === this.#site) {
+            this.#seq = Math.max(this.#seq, op.seq);
+        }
+
         this.#log.push(op);
         this.#markSeen(op);
-        this.#emit({source: 'remote', op});
+        this.#emit({ source: 'remote', op });
     }
 
     // After an insert lands, ops waiting on that char can go; they may unblock more.

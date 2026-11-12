@@ -39,8 +39,11 @@ document.querySelector('#site').textContent = site;
 const doc = saved ? Document.restore(saved.site, saved.log) : new Document(site);
 const saver = autosave(doc, store, { onError: (err) => console.warn('[save]', err.message) });
 const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-const client = new SyncClient({ url: `${scheme}://${location.host}`, docId, document: doc });
-
+const client = new SyncClient({
+  url: `${scheme}://${location.host}`, docId, document: doc,
+  beforeSend: () => saver.flush(),
+});
+  
 // ----- local typing -> ops -----
 editor.addEventListener('input', () => {
   doc.setText(editor.value);   // diff the textarea into CRDT ops (they are sent by SyncClient)
