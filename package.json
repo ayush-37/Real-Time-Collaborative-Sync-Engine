@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.js",
-    "start": "node src/server/index.js"
+    "start": "node src/server/index.js",
+    "convergence": "node scripts/convergence-report.js"
   },
   "dependencies": {
     "ws": "^8.22.1"
