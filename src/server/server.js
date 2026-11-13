@@ -16,6 +16,7 @@ import { Document } from '../doc/document.js';
 import { parseMessage, encode, ProtocolError, MAX_OPS_PER_MESSAGE } from '../net/protocol.js';
 import { serveStatic } from './static.js';
 import { DocStorage } from './storage.js';
+import { createPresence } from './presence.js';
 
 export async function startSyncServer({
   port = 3000,
@@ -23,6 +24,7 @@ export async function startSyncServer({
   dataDir = null,         // folder for the logs; null = memory only
   snapshotEvery = 1000,   // compact when the WAL holds this many ops
   fsync = true,           // true = survive power loss; false = faster (tests)
+  presenceThrottleMs = 30,
 } = {}) {
   if (dataDir) await fs.mkdir(dataDir, { recursive: true });
 
@@ -41,7 +43,15 @@ export async function startSyncServer({
       res.end();
     });
   });
-  const wss = new WebSocketServer({ server: httpServer, maxPayload: 1024 * 1024 });
+    // two WebSocket endpoints on ONE http server, routed by path:
+  //   /presence -> ephemeral presence channel;  anything else -> the document sync protocol
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
+  const presence = createPresence({ throttleMs: presenceThrottleMs, heartbeatMs });
+  httpServer.on('upgrade', (req, socket, head) => {
+    const { pathname } = new URL(req.url, 'http://localhost');
+    if (pathname === '/presence') presence.handleUpgrade(req, socket, head);
+    else wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  });
 
   async function createRoom(docId) {
     const doc = new Document('server');
@@ -182,9 +192,11 @@ export async function startSyncServer({
   return {
     port: httpServer.address().port,
     rooms,
+    presence,
     async close() {
       clearInterval(heartbeat);
       for (const ws of wss.clients) ws.terminate();
+      await presence.close();
       await new Promise((resolve) => wss.close(resolve));
       await new Promise((resolve) => httpServer.close(resolve));
       // graceful shutdown: let every queued disk write finish

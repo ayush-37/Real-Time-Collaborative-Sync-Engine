@@ -5,6 +5,9 @@ import { SyncClient } from '/src/client/sync-client.js';
 import { LocalStore, autosave, memoryStorage } from '/src/client/persistence.js';
 import { ROOT_ID } from '/src/crdt/charId.js';
 import { mountHistory } from '/src/client/history-view.js';
+import { PresenceClient } from '/src/client/presence-client.js';
+import { mountPresence } from '/src/client/presence-view.js';
+import { idToString } from '/src/crdt/charId.js';
 
 const params = new URLSearchParams(location.search);
 const wanted = params.get('doc') ?? '';
@@ -43,6 +46,16 @@ const client = new SyncClient({
   url: `${scheme}://${location.host}`, docId, document: doc,
   beforeSend: () => saver.flush(),
 });
+
+// ----- presence: a SECOND, ephemeral channel (not part of the document) -----
+const PALETTE = ['#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4', '#008080', '#9a6324', '#800000'];
+const colorFor = (s) => PALETTE[[...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % PALETTE.length];
+const wantedName = (params.get('name') ?? '').trim();
+const name = /^[\w .-]{1,24}$/.test(wantedName) ? wantedName : site;   // open the page with ?name=Ayush
+const presence = new PresenceClient({
+  url: `${scheme}://${location.host}/presence`, docId, site, name, color: colorFor(site),
+});
+mountPresence({ doc, presence });
   
 // ----- local typing -> ops -----
 editor.addEventListener('input', () => {
@@ -59,6 +72,7 @@ function saveCursor() {
     start: doc.anchorAt(editor.selectionStart),
     end: doc.anchorAt(editor.selectionEnd),
   };
+    presence.setCursor({ start: idToString(cursor.start), end: idToString(cursor.end) });
 }
 document.addEventListener('selectionchange', () => {
   if (document.activeElement === editor) saveCursor();
@@ -112,6 +126,8 @@ document.addEventListener('visibilitychange', () => {
 });
 
 client.connect();
+presence.connect();
 render();
+window.addEventListener('beforeunload', () => { client.close(); presence.close(); });
 window.addEventListener('beforeunload', () => client.close());
 window.__sync = { doc, client, store }; // handy for poking around in the browser console
