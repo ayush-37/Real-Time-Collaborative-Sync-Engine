@@ -17,6 +17,9 @@ import { parseMessage, encode, ProtocolError, MAX_OPS_PER_MESSAGE } from '../net
 import { serveStatic } from './static.js';
 import { DocStorage } from './storage.js';
 import { createPresence } from './presence.js';
+import { buildMergeEvent, isDivergent, covers } from '../ai/merge-event.js';
+
+const DOC_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 export async function startSyncServer({
   port = 3000,
@@ -24,6 +27,7 @@ export async function startSyncServer({
   dataDir = null,         // folder for the logs; null = memory only
   snapshotEvery = 1000,   // compact when the WAL holds this many ops
   fsync = true,           // true = survive power loss; false = faster (tests)
+  ai = null,
   presenceThrottleMs = 30,
 } = {}) {
   if (dataDir) await fs.mkdir(dataDir, { recursive: true });
@@ -38,6 +42,24 @@ export async function startSyncServer({
       res.end('ok');
       return;
     }
+
+    let url;
+    try {
+      url = new URL(req.url, 'http://localhost');
+    } catch {
+      res.writeHead(400);
+      res.end();
+      return;
+    }
+    // read-only: reports are produced by the server itself. The browser can never send text to the model.
+    if (req.method === 'GET' && url.pathname === '/ai/reports') {
+      const id = url.searchParams.get('doc') ?? '';
+      const room = DOC_ID.test(id) ? rooms.get(id) : null; // never CREATES a room
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ enabled: Boolean(ai), reports: room ? room.aiReports : [] }));
+      return;
+    }
+
     serveStatic(req, res).catch(() => {
       res.writeHead(500);
       res.end();
@@ -55,7 +77,7 @@ export async function startSyncServer({
 
   async function createRoom(docId) {
     const doc = new Document('server');
-    const room = { doc, clients: new Set(), outbox: [], storage: null };
+        const room = { doc, clients: new Set(), outbox: [], storage: null, aiReports: [], reportSeq: 0 };
     if (dataDir) {
       room.storage = new DocStorage(dataDir, docId, { fsync });
       const { ops, repaired } = await room.storage.load();
@@ -112,37 +134,144 @@ export async function startSyncServer({
     }
   };
 
+  // The reconnecting client re-sends its offline ops in a LATER message. Once the server has applied
+  // everything the client claimed at join time, both sides' work is in the log: build the merge event once.
+
+  function maybeFinishMerge(room, ws) {
+    const pending = ws.aiReconnect;
+
+    if (!pending) return;
+
+    // Wait until the server has received all operations Alice had
+    // when she originally joined.
+    if (!covers(room.doc.version(), pending.localVersion)) return;
+
+    // Clear first so this reconnect can trigger analysis only once.
+    ws.aiReconnect = null;
+
+    const event = buildMergeEvent(
+      room.doc.log,
+      pending.localVersion,
+      pending.remoteVersion
+    );
+
+    if (!event) return;
+
+    const report = {
+      id: ++room.reportSeq,
+      at: new Date().toISOString(),
+      site: pending.site,
+      status: 'pending',
+      localAuthors: event.localAuthors,
+      remoteAuthors: event.remoteAuthors,
+    };
+
+    room.aiReports.push(report);
+
+    // AI runs asynchronously; normal editing and synchronization do not wait.
+    ai.analyzeMerge(event)
+      .then((result) => {
+        Object.assign(report, result);
+      })
+      .catch((err) => {
+        console.error('[ai] analysis failed:', err.message);
+        Object.assign(report, {
+          status: 'error',
+          reason: 'the AI call failed',
+        });
+      });
+  }
+
   async function handleJoin(ws, msg) {
-    if (ws.room) throw new ProtocolError('already joined');
+    if (ws.room) {
+      throw new ProtocolError('Client has already joined a document');
+    }
+
     let room;
     try {
       room = await getRoom(msg.docId);
     } catch (err) {
-      console.error(`[storage] cannot load ${msg.docId}:`, err.message);
-      throw new ProtocolError('document unavailable', { fatal: true });
+      console.error(`Failed to load document ${msg.docId}:`, err);
+
+      send(ws, {
+        type: 'error',
+        message: 'document unavailable'
+      });
+
+      ws.close(1011, 'document unavailable');
+      return;
     }
-    if (ws.readyState !== WebSocket.OPEN) return; // the client left while the room was loading
+
     ws.room = room;
     ws.site = msg.site;
+
     room.clients.add(ws);
-    // anti-entropy on join: send only what this client is missing
-    send(ws, { type: 'sync', ops: room.doc.opsSince(msg.version), version: room.doc.version() });
+
+    // Capture the two versions before sending the sync response.
+    // localVersion: operations the reconnecting client already has.
+    // remoteVersion: operations the server has at this moment.
+    const localVersion = { ...msg.version };
+    const remoteVersion = room.doc.version();
+
+    // Check whether the client and server have diverged.
+    if (ai && isDivergent(localVersion, remoteVersion)) {
+      ws.aiReconnect = {
+        site: msg.site,
+        localVersion,
+        remoteVersion,
+      };
+    } else {
+      ws.aiReconnect = null;
+    }
+
+    // Send the client all operations it is missing.
+    send(ws, {
+      type: 'sync',
+      ops: room.doc.opsSince(localVersion),
+      version: remoteVersion,
+    });
   }
 
-  function handleOps(ws, msg) {
-    if (!ws.room) throw new ProtocolError('join a document first');
 
-    // a client may only send ITS OWN ops: otherwise anyone could forge edits as someone else
+  function startAnalysis(room, site, event) {
+    const report = {
+      id: ++room.reportSeq, at: Date.now(), site, status: 'pending',
+      localAuthors: event.localAuthors, remoteAuthors: event.remoteAuthors,
+    };
+    room.aiReports.push(report);
+    if (room.aiReports.length > 20) room.aiReports.shift();
+    ai.analyzeMerge(event) // asynchronous and NOT awaited: it never delays syncing
+      .then((result) => Object.assign(report, result))
+      .catch((err) => {
+        console.error('[ai] analysis failed:', err.message);
+        Object.assign(report, { status: 'error', reason: 'analysis failed' });
+      });
+  }
+  
+  function handleOps(ws, msg) {
+    const room = ws.room;
+
+    if (!room) {
+      throw new ProtocolError('Join a document first');
+    }
+
     for (const op of msg.ops) {
       if (op.site !== ws.site) {
-        throw new ProtocolError('op.site does not match the joined site', { fatal: true });
+        throw new ProtocolError(
+          'Operation site mismatch',
+          { fatal: true }
+        );
       }
     }
 
-    // duplicates produce no event (already in the log); buffered ops produce one later
-    for (const op of msg.ops) ws.room.doc.applyRemote(op);
-    flushOutbox(ws.room);
+    for (const op of msg.ops) {
+      room.doc.applyRemote(op);
+    }
+
+    flushOutbox(room);
+    maybeFinishMerge(room, ws);
   }
+
 
   async function handleMessage(ws, data, isBinary) {
     try {

@@ -8,6 +8,7 @@ import { mountHistory } from '/src/client/history-view.js';
 import { PresenceClient } from '/src/client/presence-client.js';
 import { mountPresence } from '/src/client/presence-view.js';
 import { idToString } from '/src/crdt/charId.js';
+import { mountAiPanel } from '/src/client/ai-panel.js';
 
 const params = new URLSearchParams(location.search);
 const wanted = params.get('doc') ?? '';
@@ -128,6 +129,7 @@ document.addEventListener('visibilitychange', () => {
 client.connect();
 presence.connect();
 render();
+mountAiPanel({ docId });
 window.addEventListener('beforeunload', () => { client.close(); presence.close(); });
 window.addEventListener('beforeunload', () => client.close());
 window.__sync = { doc, client, store }; // handy for poking around in the browser console
