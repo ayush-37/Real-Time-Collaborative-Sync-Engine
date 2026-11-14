@@ -40,12 +40,14 @@ export function createAiService({ chains, maxChars = 6000, maxPerMinute = 6, tim
     return true;
   };
 
-  const run = (fn) => {
+  const run = (label, fn) => {
     let timer;
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error('AI call timed out')), timeoutMs);
     });
-    return Promise.race([Promise.resolve().then(fn), timeout]).finally(() => clearTimeout(timer));
+    const work = Promise.resolve().then(fn);
+    work.catch((e) => console.error(`[ai] ${label} failed:`, e.status ?? '', e.message));
+    return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
   };
 
   return {
@@ -57,8 +59,8 @@ export function createAiService({ chains, maxChars = 6000, maxPerMinute = 6, tim
 
       // two independent chains in parallel; one failing must not throw away the other
       const [conflicts, changelog] = await Promise.allSettled([
-        run(() => chains.conflicts(event)),
-        run(() => chains.changelog(event)),
+        run('conflicts', () => chains.conflicts(event)),
+        run('changelog', () => chains.changelog(event)),
       ]);
       if (conflicts.status === 'rejected' && changelog.status === 'rejected') {
         console.error('[ai] both chains failed:', conflicts.reason?.message);

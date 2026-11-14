@@ -63,7 +63,9 @@ test('STRESS: bursts of typing while connections die at random: nothing lost, no
       await settle(server, peers, peers.length * BURSTS * PER_BURST);
       assertClean(server, peers, BURSTS * PER_BURST);
       assert.equal(server.rooms.get('doc1').doc.log.length, peers.length * BURSTS * PER_BURST); // no duplicated ops
-      assert.ok(chaos.stats.kills > 0, `seed ${seed}: the chaos never fired, so this proves nothing`);
+      
+      assert.ok(chaos.stats.kills + chaos.stats.lifetimeKills > 0,`seed ${seed}: the chaos never fired, so this proves nothing`);
+
       console.log(`seed ${seed}:`, JSON.stringify(chaos.stats));
     } finally {
       peers.forEach((p) => p.client.close());

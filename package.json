@@ -9,6 +9,9 @@
     "convergence": "node scripts/convergence-report.js"
   },
   "dependencies": {
+    "@langchain/anthropic": "^1.6.5",
+    "@langchain/google-genai": "^2.3.6",
+    "dotenv": "^18.0.10",
     "ws": "^8.22.1"
   }
 }
